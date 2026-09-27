@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
+import { randomUUID } from 'node:crypto';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const audioDir = path.resolve(process.env.AUDIO_DIR || path.join(root, '..', 'public', 'assets', 'audio'));
@@ -167,6 +168,36 @@ function validId(id) {
   return typeof id === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(id);
 }
 
+function invalidSound(message) {
+  const error = new Error(message);
+  error.status = 400;
+  throw error;
+}
+
+function parseSoundUpload(body, expectedId) {
+  const { sound, audioBase64, coverBase64 } = body || {};
+  if (!sound || !validId(sound.id) || (expectedId && sound.id !== expectedId) ||
+      typeof sound.title !== 'string' || typeof audioBase64 !== 'string' ||
+      !/^[A-Za-z0-9+/]+={0,2}$/.test(audioBase64)) {
+    invalidSound('Audio o datos no válidos');
+  }
+  const audio = Buffer.from(audioBase64, 'base64');
+  if (audio.length < 44 || audio.toString('ascii', 0, 4) !== 'RIFF' ||
+      audio.toString('ascii', 8, 12) !== 'WAVE') invalidSound('Se esperaba un archivo WAV');
+
+  let cover = null;
+  if (coverBase64 !== undefined) {
+    const match = typeof coverBase64 === 'string'
+      ? coverBase64.match(/^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$/)
+      : null;
+    if (!match) invalidSound('Portada no válida');
+    const bytes = Buffer.from(match[2], 'base64');
+    if (bytes.length > 10 * 1024 * 1024 || bytes.length < 8) invalidSound('Portada demasiado grande o vacía');
+    cover = { bytes, extension: match[1] === 'jpeg' ? 'jpg' : match[1] };
+  }
+  return { sound, audio, cover };
+}
+
 app.get('/api/sounds', async (_req, res, next) => {
   try {
     res.set('Cache-Control', 'no-store').json(await readManifest());
@@ -175,26 +206,7 @@ app.get('/api/sounds', async (_req, res, next) => {
 
 app.post('/api/sounds', async (req, res, next) => {
   try {
-    const { sound, audioBase64, coverBase64 } = req.body || {};
-    if (!sound || !validId(sound.id) || typeof sound.title !== 'string' ||
-        typeof audioBase64 !== 'string' || !/^[A-Za-z0-9+/]+={0,2}$/.test(audioBase64)) {
-      return res.status(400).json({ error: 'Audio o datos no válidos' });
-    }
-    const audio = Buffer.from(audioBase64, 'base64');
-    if (audio.length < 44 || audio.toString('ascii', 0, 4) !== 'RIFF' ||
-        audio.toString('ascii', 8, 12) !== 'WAVE') {
-      return res.status(400).json({ error: 'Se esperaba un archivo WAV' });
-    }
-    let cover = null;
-    if (coverBase64 !== undefined) {
-      if (typeof coverBase64 !== 'string' || !/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(coverBase64)) {
-        return res.status(400).json({ error: 'Portada no válida' });
-      }
-      const [, mime, content] = coverBase64.match(/^data:image\/(jpeg|png|webp);base64,(.*)$/);
-      const bytes = Buffer.from(content, 'base64');
-      if (bytes.length > 10 * 1024 * 1024 || bytes.length < 8) return res.status(400).json({ error: 'Portada demasiado grande o vacía' });
-      cover = { bytes, extension: mime === 'jpeg' ? 'jpg' : mime };
-    }
+    const { sound, audio, cover } = parseSoundUpload(req.body);
     const record = await serializeMutation(async () => {
       const manifest = await readManifest();
       if (manifest.some((item) => item.id === sound.id)) {
@@ -219,6 +231,82 @@ app.post('/api/sounds', async (req, res, next) => {
       }
     });
     res.status(201).json(record);
+  } catch (error) { next(error); }
+});
+
+app.put('/api/sounds/:id', async (req, res, next) => {
+  try {
+    const { sound, audio, cover } = parseSoundUpload(req.body, req.params.id);
+    const updated = await serializeMutation(async () => {
+      const manifest = await readManifest();
+      const index = manifest.findIndex((item) => item.id === req.params.id);
+      if (index < 0) return null;
+      const previous = manifest[index];
+      if (!/^[a-zA-Z0-9_-]+\.wav$/.test(previous.file)) invalidSound('Archivo de audio no válido');
+
+      const incoming = publicSound(sound, previous.file);
+      if (incoming.coverImage === undefined) delete incoming.coverImage;
+      const record = { ...previous, ...incoming, id: previous.id, file: previous.file,
+        addedAt: previous.addedAt, favorite: previous.favorite, playCount: previous.playCount };
+      if (cover) record.coverImage = `/assets/images/${previous.id}.${cover.extension}`;
+
+      const audioPath = path.join(audioDir, previous.file);
+      const oldCoverPath = previous.coverImage?.startsWith(`/assets/images/${previous.id}.`)
+        ? path.join(imagesDir, path.basename(previous.coverImage)) : null;
+      const replaceOldCover = oldCoverPath && (cover || record.coverImage !== previous.coverImage);
+      const newCoverPath = cover ? path.join(imagesDir, `${previous.id}.${cover.extension}`) : null;
+      if (newCoverPath && newCoverPath !== oldCoverPath) {
+        try {
+          await fs.access(newCoverPath);
+          const error = new Error('Ya existe una portada con ese nombre');
+          error.status = 409;
+          throw error;
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+        }
+      }
+      const token = randomUUID();
+      const audioTemp = `${audioPath}.${token}.upload`;
+      const audioBackup = `${audioPath}.${token}.backup`;
+      const coverTemp = newCoverPath ? `${newCoverPath}.${token}.upload` : null;
+      const coverBackup = replaceOldCover ? `${oldCoverPath}.${token}.backup` : null;
+      let audioBackedUp = false;
+      let coverBackedUp = false;
+      let audioInstalled = false;
+      let coverInstalled = false;
+      try {
+        await fs.writeFile(audioTemp, audio, { flag: 'wx' });
+        if (coverTemp) await fs.writeFile(coverTemp, cover.bytes, { flag: 'wx' });
+        await fs.rename(audioPath, audioBackup);
+        audioBackedUp = true;
+        if (coverBackup) {
+          await fs.rename(oldCoverPath, coverBackup);
+          coverBackedUp = true;
+        }
+        await fs.rename(audioTemp, audioPath);
+        audioInstalled = true;
+        if (coverTemp) {
+          await fs.rename(coverTemp, newCoverPath);
+          coverInstalled = true;
+        }
+        manifest[index] = record;
+        await writeManifest(manifest);
+      } catch (error) {
+        if (audioInstalled) await fs.unlink(audioPath).catch(() => {});
+        if (coverInstalled) await fs.unlink(newCoverPath).catch(() => {});
+        if (audioBackedUp) await fs.rename(audioBackup, audioPath);
+        if (coverBackedUp) await fs.rename(coverBackup, oldCoverPath);
+        throw error;
+      } finally {
+        await fs.unlink(audioTemp).catch(() => {});
+        if (coverTemp) await fs.unlink(coverTemp).catch(() => {});
+      }
+      await fs.unlink(audioBackup).catch(() => {});
+      if (coverBackup) await fs.unlink(coverBackup).catch(() => {});
+      return record;
+    });
+    if (!updated) return res.status(404).json({ error: 'Audio no encontrado' });
+    res.json(updated);
   } catch (error) { next(error); }
 });
 

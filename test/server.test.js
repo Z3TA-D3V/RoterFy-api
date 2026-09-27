@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -74,7 +74,8 @@ test('la API persiste y borra guiones, vídeos y audios con portada', async () =
     wav.write('RIFF', 0);
     wav.write('WAVE', 8);
     const cover = Buffer.from('jpeg-demo-image');
-    const sound = { id: 'sound-test', title: 'Nuevo', category: 'sfx', coverImage: 'blob:preview' };
+    const sound = { id: 'sound-test', title: 'Nuevo', category: 'sfx', coverImage: 'blob:preview',
+      addedAt: 123, favorite: false, playCount: 0, tags: ['primero'] };
     assert.equal((await fetch(`${base}/sounds`, json({ sound, audioBase64: Buffer.from('bad').toString('base64') }))).status, 400);
     assert.equal((await fetch(`${base}/sounds`, json({ sound, audioBase64: wav.toString('base64'), coverBase64: 'data:image/svg+xml;base64,PHN2Zz4=' }))).status, 400);
     const created = await fetch(`${base}/sounds`, json({ sound, audioBase64: wav.toString('base64'),
@@ -90,10 +91,80 @@ test('la API persiste y borra guiones, vídeos y audios con portada', async () =
     assert.deepEqual(((await edited.json()).id), 'sound-test');
     assert.equal((await fetch(`${base}/sounds/sound-test/play`, { method: 'POST' })).status, 200);
     assert.equal((await (await fetch(`${base}/sounds`)).json())[0].playCount, 1);
+
+    const revisedWav = Buffer.alloc(48, 7);
+    revisedWav.write('RIFF', 0);
+    revisedWav.write('WAVE', 8);
+    const revisedCover = Buffer.from('webp-demo-image');
+    const update = (id, details, audio = revisedWav, coverBase64) => fetch(`${base}/sounds/${id}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sound: details, audioBase64: audio.toString('base64'), coverBase64 }),
+    });
+    assert.equal((await update('sound-test', { ...sound, id: 'other-id' })).status, 400);
+    assert.equal((await update('missing', { ...sound, id: 'missing' })).status, 404);
+    assert.equal((await update('sound-test', sound, Buffer.from('bad'))).status, 400);
+    assert.deepEqual(readFileSync(path.join(audioDir, 'sound-test.wav')), wav);
+
+    const revisedCoverFile = path.join(temporaryRoot, 'assets', 'images', 'sound-test.webp');
+    writeFileSync(revisedCoverFile, 'portada ajena');
+    assert.equal((await update('sound-test', sound, revisedWav,
+      `data:image/webp;base64,${revisedCover.toString('base64')}`)).status, 409);
+    assert.equal(readFileSync(revisedCoverFile, 'utf8'), 'portada ajena');
+    assert.deepEqual(readFileSync(path.join(audioDir, 'sound-test.wav')), wav);
+    unlinkSync(revisedCoverFile);
+
+    const replaced = await update('sound-test', { ...sound, title: 'Editado', tags: ['nuevo'], favorite: false,
+      playCount: 999, addedAt: 999, coverImage: 'blob:preview' }, revisedWav,
+      `data:image/webp;base64,${revisedCover.toString('base64')}`);
+    assert.equal(replaced.status, 200);
+    const replacement = await replaced.json();
+    assert.equal(replacement.id, sound.id);
+    assert.equal(replacement.file, 'sound-test.wav');
+    assert.equal(replacement.title, 'Editado');
+    assert.deepEqual(replacement.tags, ['nuevo']);
+    assert.equal(replacement.addedAt, 123);
+    assert.equal(replacement.playCount, 1);
+    assert.equal(replacement.favorite, true);
+    assert.equal(replacement.coverImage, '/assets/images/sound-test.webp');
+    assert.deepEqual(readFileSync(path.join(audioDir, 'sound-test.wav')), revisedWav);
+    assert.ok(!existsSync(coverFile));
+    assert.deepEqual(readFileSync(revisedCoverFile), revisedCover);
+    assert.equal((await (await fetch(`${base}/sounds`)).json()).length, 1);
+
+    const manifestTempObstacle = path.join(audioDir, `manifest.json.${child.pid}.tmp`);
+    mkdirSync(manifestTempObstacle);
+    try {
+      const failedWav = Buffer.from(revisedWav);
+      failedWav[20] = 99;
+      const failed = await update('sound-test', { ...sound, title: 'No debe guardarse' }, failedWav,
+        `data:image/png;base64,${Buffer.from('png-demo-image').toString('base64')}`);
+      assert.equal(failed.status, 500);
+      assert.deepEqual(readFileSync(path.join(audioDir, 'sound-test.wav')), revisedWav);
+      assert.deepEqual(readFileSync(revisedCoverFile), revisedCover);
+      assert.ok(!existsSync(path.join(temporaryRoot, 'assets', 'images', 'sound-test.png')));
+      assert.equal((await (await fetch(`${base}/sounds`)).json())[0].title, 'Editado');
+    } finally { rmdirSync(manifestTempObstacle); }
+
+    const preset = await update('sound-test', { ...sound, title: 'Con preset', coverImage: '/assets/images/vine_boom.jpg' });
+    assert.equal(preset.status, 200);
+    assert.equal((await preset.json()).coverImage, '/assets/images/vine_boom.jpg');
+    assert.ok(!existsSync(revisedCoverFile));
+    assert.equal((await (await fetch(`${base}/sounds`)).json()).length, 1);
+
     assert.equal((await fetch(`${base}/sounds/sound-test`, { method: 'DELETE' })).status, 204);
     assert.ok(!existsSync(coverFile));
     assert.equal((await fetch(`${base}/sounds/sound-test`, { method: 'DELETE' })).status, 404);
     assert.equal((await fetch(`${base}/sounds/sound-test/play`, { method: 'POST' })).status, 404);
+
+    const legacy = { ...sound, id: 'legacy', title: 'Importado', file: '002-legacy.wav' };
+    writeFileSync(path.join(audioDir, 'manifest.json'), `${JSON.stringify([legacy])}\n`);
+    writeFileSync(path.join(audioDir, legacy.file), wav);
+    const legacyEdit = await update('legacy', { ...legacy, title: 'Importado editado' });
+    assert.equal(legacyEdit.status, 200);
+    assert.equal((await legacyEdit.json()).file, legacy.file);
+    assert.deepEqual(readFileSync(path.join(audioDir, legacy.file)), revisedWav);
+    assert.ok(!existsSync(path.join(audioDir, 'legacy.wav')));
+    assert.equal((await (await fetch(`${base}/sounds`)).json()).length, 1);
   } finally {
     child.kill();
     if (child.exitCode === null) await new Promise((resolve) => child.once('exit', resolve));

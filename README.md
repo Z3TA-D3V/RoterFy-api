@@ -21,9 +21,15 @@ pnpm install
 pnpm test
 ```
 
-Las pruebas usan directorios temporales y comprueban el alta, consulta y
-borrado de guiones, vídeos y audios con portada. GitHub Actions las ejecuta
+Las pruebas usan directorios temporales y comprueban el alta, consulta, edición y
+borrado de guiones, vídeos y audios con portada. También comprueban que un fallo
+al actualizar el catálogo conserva el WAV y la portada anteriores. GitHub Actions las ejecuta
 en cada push y pull request.
+
+`PUT /api/sounds/:id` reemplaza el WAV y, si se envía `coverBase64`, la portada
+del sonido existente. Conserva el ID, el nombre del archivo, la fecha de alta,
+el favorito y el contador de reproducciones. El cuerpo usa el mismo formato
+que `POST /api/sounds`: `sound`, `audioBase64` y `coverBase64` opcional.
 
 Por defecto, `AUDIO_DIR` apunta a `../public/assets/audio` cuando esta carpeta
 está dentro del proyecto frontend. Si mueves la API a otro repositorio, define
