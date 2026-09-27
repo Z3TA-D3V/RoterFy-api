@@ -14,6 +14,17 @@ npm run dev
 Escucha en `http://127.0.0.1:3001`. El frontend se ejecuta por separado en
 `http://127.0.0.1:3000`.
 
+## Pruebas
+
+```bash
+pnpm install
+pnpm test
+```
+
+Las pruebas usan directorios temporales y comprueban el alta, consulta y
+borrado de guiones, vídeos y audios con portada. GitHub Actions las ejecuta
+en cada push y pull request.
+
 Por defecto, `AUDIO_DIR` apunta a `../public/assets/audio` cuando esta carpeta
 está dentro del proyecto frontend. Si mueves la API a otro repositorio, define
 `AUDIO_DIR` con la ruta absoluta de la carpeta que contiene `manifest.json` y
