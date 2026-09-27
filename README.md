@@ -14,6 +14,28 @@ npm run dev
 Escucha en `http://127.0.0.1:3001`. El frontend se ejecuta por separado en
 `http://127.0.0.1:3000`.
 
+Para usar el asistente de Guiones, configura `OPENAI_API_KEY` **antes de arrancar
+la API y en la misma ventana de PowerShell**:
+
+```powershell
+cd 'C:\ruta\a\rotvault\api'
+$env:OPENAI_API_KEY = 'tu-clave-privada'
+$env:OPENAI_API_KEY.Length  # Debe ser mayor que cero; no imprime la clave.
+pnpm dev
+```
+
+También puedes crear `api/.env` (está ignorado por Git) con una línea
+`OPENAI_API_KEY=tu-clave-privada` y arrancar con `pnpm dev`. La API lee ese
+archivo automáticamente; si la variable ya existe en el proceso, tiene
+prioridad. Si cambias la variable o el archivo después de arrancar, detén y
+reinicia la API. `$env:OPENAI_API_KEY = ''` deja la clave vacía.
+
+La clave nunca se envía al frontend. `POST /api/scripts/:id/chat` usa la SDK
+oficial de OpenAI y emite eventos NDJSON `delta`, `done` o `error`. La API
+conserva en `scripts.json` el historial, el uso de tokens y el coste aproximado
+de cada respuesta. El coste depende de las tarifas vigentes y puede diferir
+de la factura final.
+
 ## Pruebas
 
 ```bash

@@ -9,6 +9,8 @@
     "test": "node --test"
   },
   "dependencies": {
-    "express": "^4.21.2"
+    "dotenv": "^18.0.4",
+    "express": "^4.21.2",
+    "openai": "^7.23.0"
   }
 }

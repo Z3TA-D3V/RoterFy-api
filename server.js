@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import { randomUUID } from 'node:crypto';
+import { buildScriptInput, estimateCost, getOpenAIClient, MODELS } from './script-ai.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const audioDir = path.resolve(process.env.AUDIO_DIR || path.join(root, '..', 'public', 'assets', 'audio'));
@@ -117,6 +118,60 @@ function dataRoutes(name, file, requiredFields) {
 
 dataRoutes('scripts', scriptsPath, ['title', 'content', 'category', 'status']);
 dataRoutes('stock-videos', videosPath, ['title', 'category', 'format', 'durationText', 'notes']);
+
+app.post('/api/scripts/:id/chat', async (req, res, next) => {
+  try {
+    const { message, model = 'gpt-6-luna', reasoningEffort = 'low' } = req.body || {};
+    if (!validId(req.params.id) || typeof message !== 'string' || !message.trim() || message.length > 12000 ||
+      !Object.hasOwn(MODELS, model) || !['low', 'medium', 'high'].includes(reasoningEffort)) {
+      return res.status(400).json({ error: 'Parámetros de chat no válidos' });
+    }
+    const script = (await readList(scriptsPath)).find((item) => item.id === req.params.id);
+    if (!script) return res.status(404).json({ error: 'Guión no encontrado' });
+    const client = getOpenAIClient();
+    const stream = await client.responses.create({
+      model, input: buildScriptInput(script, message.trim()),
+      reasoning: { effort: reasoningEffort }, stream: true, store: false,
+    });
+    res.set({ 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no' });
+    res.flushHeaders();
+    const send = (event) => res.write(`${JSON.stringify(event)}\n`);
+    let answer = '';
+    let usage = null;
+    try {
+      for await (const event of stream) {
+        if (res.destroyed) break;
+        if (event.type === 'response.output_text.delta') {
+          answer += event.delta;
+          send({ type: 'delta', delta: event.delta });
+        } else if (event.type === 'response.completed') {
+          usage = event.response.usage || null;
+        } else if (event.type === 'response.failed' || event.type === 'error') {
+          throw new Error(event.response?.error?.message || event.message || 'La generación falló');
+        }
+      }
+      if (res.destroyed || !answer.trim()) return;
+      const timestamp = Date.now();
+      const cost = estimateCost(model, usage);
+      const user = { role: 'user', content: message.trim(), model, timestamp };
+      const assistant = { role: 'assistant', content: answer, model, timestamp, usage, cost };
+      const saved = await serializeMutation(async () => {
+        const items = await readList(scriptsPath);
+        const current = items.find((item) => item.id === script.id);
+        if (!current) return null;
+        const updated = { ...current, model, reasoningEffort, chatHistory: [...(current.chatHistory || []), user, assistant],
+          totalCost: (current.totalCost || 0) + (cost || 0), updatedAt: timestamp };
+        await writeList(scriptsPath, items.map((item) => item.id === script.id ? updated : item));
+        return updated;
+      });
+      if (!saved) throw new Error('El guión ya no existe');
+      send({ type: 'done', user, assistant, totalCost: saved.totalCost, script: saved });
+      res.end();
+    } catch (error) {
+      if (!res.destroyed) { send({ type: 'error', error: error.message || 'Error de OpenAI' }); res.end(); }
+    }
+  } catch (error) { next(error); }
+});
 
 app.put('/api/stock-videos/:id/file', async (req, res, next) => {
   const id = req.params.id;
@@ -381,7 +436,7 @@ app.use('/api/images', express.static(imagesDir));
 app.use('/api/videos', express.static(videosDir));
 
 app.use((error, _req, res, _next) => {
-  console.error(error);
+  if (error.code !== 'MISSING_OPENAI_KEY') console.error(error);
   res.status(error.status || 500).json({ error: error.message || 'Error al guardar el audio' });
 });
 
