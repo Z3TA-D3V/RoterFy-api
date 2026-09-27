@@ -41,14 +41,27 @@ test('la API persiste y borra guiones, vídeos y audios con portada', async () =
     const base = `http://127.0.0.1:${port}/api`;
     const json = (value) => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
 
+    assert.equal((await fetch(`${base}/scripts`, { headers: { Origin: 'https://unknown.example' } })).status, 403);
+    const preflight = await fetch(`${base}/scripts`, { method: 'OPTIONS', headers: { Origin: 'http://localhost:3000' } });
+    assert.equal(preflight.status, 204);
+    assert.match(preflight.headers.get('access-control-allow-methods'), /PUT/);
+    assert.equal((await fetch(`${base}/scripts`, json({ id: '../escape', title: 'X' }))).status, 400);
+
     const script = { id: 'script-test', title: 'Prueba', content: 'Texto', category: 'hook', status: 'idea', updatedAt: 1 };
     assert.equal((await fetch(`${base}/scripts`, json(script))).status, 200);
     assert.deepEqual(await (await fetch(`${base}/scripts`)).json(), [script]);
     assert.equal((await fetch(`${base}/scripts/script-test`, { method: 'DELETE' })).status, 204);
+    assert.equal((await fetch(`${base}/scripts/script-test`, { method: 'DELETE' })).status, 404);
     assert.deepEqual(JSON.parse(readFileSync(path.join(temporaryRoot, 'assets', 'data', 'scripts.json'))), []);
 
     const video = { id: 'video-test', title: 'Clip', category: 'b-roll', format: '16:9', durationText: '00:01', notes: '', favorite: false };
     assert.equal((await fetch(`${base}/stock-videos`, json(video))).status, 200);
+    assert.equal((await fetch(`${base}/stock-videos/video-test/file`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' }, body: Buffer.from('bad'),
+    })).status, 400);
+    assert.equal((await fetch(`${base}/stock-videos/missing/file`, {
+      method: 'PUT', headers: { 'Content-Type': 'video/mp4' }, body: Buffer.from('video-demo'),
+    })).status, 404);
     assert.equal((await fetch(`${base}/stock-videos/video-test/file`, {
       method: 'PUT', headers: { 'Content-Type': 'video/mp4' }, body: Buffer.from('video-demo'),
     })).status, 200);
@@ -62,14 +75,25 @@ test('la API persiste y borra guiones, vídeos y audios con portada', async () =
     wav.write('WAVE', 8);
     const cover = Buffer.from('jpeg-demo-image');
     const sound = { id: 'sound-test', title: 'Nuevo', category: 'sfx', coverImage: 'blob:preview' };
+    assert.equal((await fetch(`${base}/sounds`, json({ sound, audioBase64: Buffer.from('bad').toString('base64') }))).status, 400);
+    assert.equal((await fetch(`${base}/sounds`, json({ sound, audioBase64: wav.toString('base64'), coverBase64: 'data:image/svg+xml;base64,PHN2Zz4=' }))).status, 400);
     const created = await fetch(`${base}/sounds`, json({ sound, audioBase64: wav.toString('base64'),
       coverBase64: `data:image/jpeg;base64,${cover.toString('base64')}` }));
     assert.equal(created.status, 201);
     assert.equal((await created.json()).coverImage, '/assets/images/sound-test.jpg');
+    assert.equal((await fetch(`${base}/sounds`, json({ sound, audioBase64: wav.toString('base64') }))).status, 409);
     const coverFile = path.join(temporaryRoot, 'assets', 'images', 'sound-test.jpg');
     assert.ok(existsSync(coverFile));
+    const edited = await fetch(`${base}/sounds/sound-test`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'other-id', file: 'other.wav', favorite: true }) });
+    assert.equal(edited.status, 200);
+    assert.deepEqual(((await edited.json()).id), 'sound-test');
+    assert.equal((await fetch(`${base}/sounds/sound-test/play`, { method: 'POST' })).status, 200);
+    assert.equal((await (await fetch(`${base}/sounds`)).json())[0].playCount, 1);
     assert.equal((await fetch(`${base}/sounds/sound-test`, { method: 'DELETE' })).status, 204);
     assert.ok(!existsSync(coverFile));
+    assert.equal((await fetch(`${base}/sounds/sound-test`, { method: 'DELETE' })).status, 404);
+    assert.equal((await fetch(`${base}/sounds/sound-test/play`, { method: 'POST' })).status, 404);
   } finally {
     child.kill();
     if (child.exitCode === null) await new Promise((resolve) => child.once('exit', resolve));
