@@ -50,6 +50,32 @@ test('la API persiste y borra guiones, vídeos y audios con portada', async () =
     const script = { id: 'script-test', title: 'Prueba', content: 'Texto', category: 'hook', status: 'idea', updatedAt: 1 };
     assert.equal((await fetch(`${base}/scripts`, json(script))).status, 200);
     assert.deepEqual(await (await fetch(`${base}/scripts`)).json(), [script]);
+    assert.deepEqual(await (await fetch(`${base}/scripts/script-test/recordings`)).json(), []);
+    assert.equal((await fetch(`${base}/scripts/missing/recordings`, { method: 'POST', headers: { 'Content-Type': 'audio/webm' }, body: Buffer.from('voice') })).status, 404);
+    const takeResponse = await fetch(`${base}/scripts/script-test/recordings`, {
+      method: 'POST', headers: { 'Content-Type': 'audio/webm' }, body: Buffer.from('voice-test'),
+    });
+    assert.equal(takeResponse.status, 201);
+    const take = await takeResponse.json();
+    assert.equal(take.scriptId, script.id);
+    assert.ok(existsSync(path.join(temporaryRoot, 'assets', 'recordings', take.originalFile)));
+    assert.equal((await (await fetch(`${base}/scripts/script-test/recordings`)).json()).length, 1);
+    assert.equal((await fetch(`${base}/scripts/other/recordings/${take.id}/file`)).status, 404);
+    assert.equal(await (await fetch(`${base}/scripts/script-test/recordings/${take.id}/file`)).text(), 'voice-test');
+    const editedUrl = `${base}/scripts/script-test/recordings/${take.id}/edited`;
+    const edit = { startSec: 0, endSec: 1, gain: 1, normalize: true, fadeIn: 0, fadeOut: 0 };
+    assert.equal((await fetch(editedUrl, { method: 'PUT', headers: { 'Content-Type': 'audio/wav', 'X-Edit-Settings': JSON.stringify(edit) }, body: Buffer.from('bad-audio') })).status, 400);
+    const voiceWav = Buffer.alloc(48);
+    voiceWav.write('RIFF', 0); voiceWav.write('WAVE', 8);
+    const editResponse = await fetch(editedUrl, { method: 'PUT', headers: { 'Content-Type': 'audio/wav', 'X-Edit-Settings': JSON.stringify(edit) }, body: voiceWav });
+    assert.equal(editResponse.status, 200);
+    const editedRecording = await editResponse.json();
+    assert.ok(editedRecording.editedFile.startsWith(take.id));
+    assert.deepEqual(editedRecording.edit, edit);
+    assert.deepEqual(Buffer.from(await (await fetch(`${base}/scripts/script-test/recordings/${take.id}/file?variant=edited`)).arrayBuffer()), voiceWav);
+    assert.equal((await fetch(`${base}/scripts/script-test/recordings/${take.id}`, { method: 'DELETE' })).status, 204);
+    assert.equal((await (await fetch(`${base}/scripts/script-test/recordings`)).json()).length, 0);
+    assert.ok(!existsSync(path.join(temporaryRoot, 'assets', 'recordings', take.originalFile)));
     assert.equal((await fetch(`${base}/scripts/script-test`, { method: 'DELETE' })).status, 204);
     assert.equal((await fetch(`${base}/scripts/script-test`, { method: 'DELETE' })).status, 404);
     assert.deepEqual(JSON.parse(readFileSync(path.join(temporaryRoot, 'assets', 'data', 'scripts.json'))), []);

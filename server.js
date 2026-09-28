@@ -16,6 +16,8 @@ const videosDir = path.resolve(process.env.VIDEOS_DIR || path.join(assetsDir, 'v
 const dataDir = path.resolve(process.env.DATA_DIR || path.join(assetsDir, 'data'));
 const scriptsPath = path.join(dataDir, 'scripts.json');
 const videosPath = path.join(dataDir, 'stock-videos.json');
+const recordingsDir = path.resolve(process.env.RECORDINGS_DIR || path.join(assetsDir, 'recordings'));
+const recordingsPath = path.join(dataDir, 'script-recordings.json');
 const app = express();
 const port = Number(process.env.PORT || 3001);
 const frontendOrigins = process.env.FRONTEND_ORIGIN?.split(',').map((origin) => origin.trim());
@@ -42,7 +44,7 @@ app.use('/api', (req, res, next) => {
   if (origin) res.set('Access-Control-Allow-Origin', origin);
   if (req.method === 'OPTIONS') {
     res.set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-    res.set('Access-Control-Allow-Headers', 'Content-Type');
+    res.set('Access-Control-Allow-Headers', 'Content-Type, X-Edit-Settings');
     return res.status(204).end();
   }
   next();
@@ -118,6 +120,138 @@ function dataRoutes(name, file, requiredFields) {
 
 dataRoutes('scripts', scriptsPath, ['title', 'content', 'category', 'status']);
 dataRoutes('stock-videos', videosPath, ['title', 'category', 'format', 'durationText', 'notes']);
+
+const recordingTypes = { 'audio/webm': 'webm', 'audio/ogg': 'ogg', 'audio/mp4': 'm4a', 'audio/wav': 'wav' };
+const recordingLimit = 300 * 1024 * 1024;
+
+async function receiveRecording(req, file) {
+  let bytes = 0;
+  try {
+    await pipeline(req, new Transform({
+      transform(chunk, _encoding, callback) {
+        bytes += chunk.length;
+        if (bytes > recordingLimit) {
+          const error = new Error('La toma supera 300 MB');
+          error.status = 413;
+          callback(error);
+        } else callback(null, chunk);
+      },
+    }), createWriteStream(file, { flags: 'wx' }));
+    if (!bytes) {
+      const error = new Error('Grabación vacía');
+      error.status = 400;
+      throw error;
+    }
+    return bytes;
+  } catch (error) {
+    await fs.unlink(file).catch(() => {});
+    throw error;
+  }
+}
+
+app.get('/api/scripts/:id/recordings', async (req, res, next) => {
+  try {
+    if (!validId(req.params.id)) return res.status(400).json({ error: 'ID no válido' });
+    const scripts = await readList(scriptsPath);
+    if (!scripts.some((item) => item.id === req.params.id)) return res.status(404).json({ error: 'Guión no encontrado' });
+    const recordings = await readList(recordingsPath);
+    res.set('Cache-Control', 'no-store').json(recordings.filter((item) => item.scriptId === req.params.id));
+  } catch (error) { next(error); }
+});
+
+app.post('/api/scripts/:id/recordings', async (req, res, next) => {
+  const mime = req.get('content-type')?.split(';')[0];
+  const extension = recordingTypes[mime];
+  if (!validId(req.params.id) || !extension) return res.status(400).json({ error: 'Formato de audio no válido' });
+  const id = `take-${randomUUID()}`;
+  const file = `${id}.${extension}`;
+  const location = path.join(recordingsDir, file);
+  try {
+    const scripts = await readList(scriptsPath);
+    if (!scripts.some((item) => item.id === req.params.id)) return res.status(404).json({ error: 'Guión no encontrado' });
+    const bytes = await receiveRecording(req, location);
+    const record = { id, scriptId: req.params.id, createdAt: Date.now(), originalFile: file, editedFile: null, bytes };
+    try {
+      await serializeMutation(async () => {
+        const recordings = await readList(recordingsPath);
+        await writeList(recordingsPath, [record, ...recordings]);
+      });
+    } catch (error) {
+      await fs.unlink(location).catch(() => {});
+      throw error;
+    }
+    res.status(201).json(record);
+  } catch (error) { next(error); }
+});
+
+app.put('/api/scripts/:id/recordings/:takeId/edited', async (req, res, next) => {
+  if (!validId(req.params.id) || !validId(req.params.takeId) || req.get('content-type')?.split(';')[0] !== 'audio/wav') {
+    return res.status(400).json({ error: 'Se espera audio WAV' });
+  }
+  const temporary = path.join(recordingsDir, `${req.params.takeId}.${randomUUID()}.upload`);
+  try {
+    let edit;
+    try { edit = JSON.parse(req.get('x-edit-settings') || 'null'); } catch { edit = null; }
+    if (!edit || ['startSec', 'endSec', 'gain', 'fadeIn', 'fadeOut'].some((key) => !Number.isFinite(edit[key])) ||
+        typeof edit.normalize !== 'boolean' || edit.startSec < 0 || edit.endSec <= edit.startSec ||
+        edit.gain < 0.25 || edit.gain > 2 || edit.fadeIn < 0 || edit.fadeOut < 0) {
+      return res.status(400).json({ error: 'Ajustes de edición no válidos' });
+    }
+    const existing = (await readList(recordingsPath)).find((item) => item.id === req.params.takeId && item.scriptId === req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Toma no encontrada' });
+    await receiveRecording(req, temporary);
+    const header = Buffer.alloc(12);
+    const handle = await fs.open(temporary, 'r');
+    try { await handle.read(header, 0, 12, 0); } finally { await handle.close(); }
+    if (header.toString('ascii', 0, 4) !== 'RIFF' || header.toString('ascii', 8, 12) !== 'WAVE') {
+      await fs.unlink(temporary);
+      return res.status(400).json({ error: 'Archivo WAV no válido' });
+    }
+    const updated = await serializeMutation(async () => {
+      const recordings = await readList(recordingsPath);
+      const index = recordings.findIndex((item) => item.id === req.params.takeId && item.scriptId === req.params.id);
+      if (index < 0) { const error = new Error('Toma no encontrada'); error.status = 404; throw error; }
+      const editedFile = `${req.params.takeId}-${randomUUID()}.wav`;
+      await fs.rename(temporary, path.join(recordingsDir, editedFile));
+      const previousFile = recordings[index].editedFile;
+      recordings[index] = { ...recordings[index], editedFile, edit, updatedAt: Date.now() };
+      try { await writeList(recordingsPath, recordings); }
+      catch (error) { await fs.unlink(path.join(recordingsDir, editedFile)).catch(() => {}); throw error; }
+      if (previousFile) await fs.unlink(path.join(recordingsDir, path.basename(previousFile))).catch(() => {});
+      return recordings[index];
+    });
+    res.json(updated);
+  } catch (error) {
+    await fs.unlink(temporary).catch(() => {});
+    next(error);
+  }
+});
+
+app.get('/api/scripts/:id/recordings/:takeId/file', async (req, res, next) => {
+  try {
+    if (!validId(req.params.id) || !validId(req.params.takeId)) return res.status(400).json({ error: 'ID no válido' });
+    const record = (await readList(recordingsPath)).find((item) => item.id === req.params.takeId && item.scriptId === req.params.id);
+    if (!record) return res.status(404).json({ error: 'Toma no encontrada' });
+    const file = req.query.variant === 'edited' ? record.editedFile : record.originalFile;
+    if (!file) return res.status(404).json({ error: 'Edición no encontrada' });
+    res.set('Cache-Control', 'no-store').sendFile(path.join(recordingsDir, path.basename(file)));
+  } catch (error) { next(error); }
+});
+
+app.delete('/api/scripts/:id/recordings/:takeId', async (req, res, next) => {
+  try {
+    if (!validId(req.params.id) || !validId(req.params.takeId)) return res.status(400).json({ error: 'ID no válido' });
+    const record = await serializeMutation(async () => {
+      const recordings = await readList(recordingsPath);
+      const found = recordings.find((item) => item.id === req.params.takeId && item.scriptId === req.params.id);
+      if (found) await writeList(recordingsPath, recordings.filter((item) => item !== found));
+      return found;
+    });
+    if (!record) return res.status(404).json({ error: 'Toma no encontrada' });
+    await Promise.all([record.originalFile, record.editedFile].filter(Boolean).map((file) => fs.unlink(path.join(recordingsDir, path.basename(file))).catch(() => {})));
+    res.status(204).end();
+  } catch (error) { next(error); }
+});
 
 app.post('/api/scripts/:id/chat', async (req, res, next) => {
   try {
@@ -441,8 +575,8 @@ app.use((error, _req, res, _next) => {
 });
 
 await fs.access(manifestPath);
-await Promise.all([imagesDir, videosDir, dataDir].map((directory) => fs.mkdir(directory, { recursive: true })));
-await Promise.all([scriptsPath, videosPath].map(async (file) => {
+await Promise.all([imagesDir, videosDir, recordingsDir, dataDir].map((directory) => fs.mkdir(directory, { recursive: true })));
+await Promise.all([scriptsPath, videosPath, recordingsPath].map(async (file) => {
   try { await fs.writeFile(file, '[]\n', { flag: 'wx' }); }
   catch (error) { if (error.code !== 'EEXIST') throw error; }
 }));
