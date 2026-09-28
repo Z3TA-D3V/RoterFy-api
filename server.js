@@ -255,16 +255,17 @@ app.delete('/api/scripts/:id/recordings/:takeId', async (req, res, next) => {
 
 app.post('/api/scripts/:id/chat', async (req, res, next) => {
   try {
-    const { message, model = 'gpt-6-luna', reasoningEffort = 'low' } = req.body || {};
+    const { message, model = 'gpt-6-luna', reasoningEffort = 'low', mandatoryFormat } = req.body || {};
     if (!validId(req.params.id) || typeof message !== 'string' || !message.trim() || message.length > 12000 ||
-      !Object.hasOwn(MODELS, model) || !['low', 'medium', 'high'].includes(reasoningEffort)) {
+      !Object.hasOwn(MODELS, model) || !['low', 'medium', 'high'].includes(reasoningEffort) ||
+      (mandatoryFormat !== undefined && (typeof mandatoryFormat !== 'string' || !mandatoryFormat.trim() || mandatoryFormat.length > 4000))) {
       return res.status(400).json({ error: 'Parámetros de chat no válidos' });
     }
     const script = (await readList(scriptsPath)).find((item) => item.id === req.params.id);
     if (!script) return res.status(404).json({ error: 'Guión no encontrado' });
     const client = getOpenAIClient();
     const stream = await client.responses.create({
-      model, input: buildScriptInput(script, message.trim()),
+      model, input: buildScriptInput(script, message.trim(), mandatoryFormat?.trim()),
       reasoning: { effort: reasoningEffort }, stream: true, store: false,
     });
     res.set({ 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no' });

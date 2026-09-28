@@ -10,10 +10,24 @@ test('el contexto incluye el prompt, el guión actual y solo los últimos ocho m
   const input = buildScriptInput(script, 'Nueva instrucción');
   assert.equal(input[0].role, 'developer');
   assert.match(input[0].content, /Mi estilo/);
+  assert.match(input[0].content, /\[NARRADOR\].*\[\/NARRADOR\]/);
   assert.match(input[1].content, /Versión actual/);
   assert.equal(input.length, 11);
   assert.equal(input[2].content, 'Mensaje 2');
   assert.equal(input.at(-1).content, 'Nueva instrucción');
+});
+
+test('el formato de narrador se añade después de cualquier estilo personalizado', () => {
+  const input = buildScriptInput({ systemPromptUsed: 'Mi estilo. No uses bloques de narrador.', content: '', chatHistory: [] }, 'Escribe un guión');
+  const prompt = input[0].content;
+  assert.ok(prompt.indexOf('Regla obligatoria para cualquier estilo') > prompt.indexOf('No uses bloques de narrador'));
+  assert.match(prompt, /Esta regla prevalece sobre instrucciones de estilo/);
+});
+
+test('acepta un formato global editado en vez del formato predeterminado', () => {
+  const prompt = buildScriptInput({ systemPromptUsed: 'Mi estilo', content: '', chatHistory: [] }, 'Escribe', 'Usa [VOZ]texto[/VOZ].')[0].content;
+  assert.match(prompt, /Usa \[VOZ\]texto\[\/VOZ\]/);
+  assert.doesNotMatch(prompt, /\[NARRADOR\]/);
 });
 
 test('el coste se calcula a partir de usage y descuenta tokens en caché', () => {

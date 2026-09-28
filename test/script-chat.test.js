@@ -49,7 +49,8 @@ test('el chat transmite la respuesta y persiste historial, usage y coste', async
     const script = { id: 'script-chat', title: 'Video', content: '# Actual', category: 'hook', status: 'idea', updatedAt: 1,
       systemPromptUsed: 'Estilo personalizado', chatHistory: [] };
     assert.equal((await fetch(`${base}/scripts`, post(script))).status, 200);
-    const response = await fetch(`${base}/scripts/script-chat/chat`, post({ message: 'Mejora el inicio', model: 'gpt-6-luna', reasoningEffort: 'medium' }));
+    assert.equal((await fetch(`${base}/scripts/script-chat/chat`, post({ message: 'Mal', mandatoryFormat: '' }))).status, 400);
+    const response = await fetch(`${base}/scripts/script-chat/chat`, post({ message: 'Mejora el inicio', model: 'gpt-6-luna', reasoningEffort: 'medium', mandatoryFormat: 'Usa [VOZ]texto[/VOZ] en cada intervención.' }));
     assert.equal(response.status, 200);
     const events = (await response.text()).trim().split('\n').map((line) => JSON.parse(line));
     assert.deepEqual(events.map((event) => event.type), ['delta', 'delta', 'done']);
@@ -60,6 +61,8 @@ test('el chat transmite la respuesta y persiste historial, usage y coste', async
     assert.equal(received.reasoning.effort, 'medium');
     assert.equal(received.input[0].role, 'developer');
     assert.match(received.input[0].content, /Estilo personalizado/);
+    assert.match(received.input[0].content, /Usa \[VOZ\]texto\[\/VOZ\]/);
+    assert.doesNotMatch(received.input[0].content, /\[NARRADOR\]/);
     assert.match(received.input[1].content, /# Actual/);
     const saved = (await (await fetch(`${base}/scripts`)).json())[0];
     assert.equal(saved.content, '# Actual');
