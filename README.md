@@ -14,6 +14,13 @@ npm run dev
 Escucha en `http://127.0.0.1:3001`. El frontend se ejecuta por separado en
 `http://127.0.0.1:3000`.
 
+Para usar **Descargas**, instala `yt-dlp`, `ffmpeg` y `ffprobe` en la máquina de
+esta API. `YTDLP_PATH` y `FFMPEG_PATH` permiten indicar ejecutables fuera de
+`PATH`. La API inicia los procesos con argumentos separados, sin consola de
+comandos del navegador. `API_HOST` cambia la interfaz de escucha (por defecto
+`127.0.0.1`); para una red privada, consulta las instrucciones del README
+principal y configura también `FRONTEND_ORIGIN` y `VITE_API_URL`.
+
 Para usar el asistente de Guiones, configura `OPENAI_API_KEY` **antes de arrancar
 la API y en la misma ventana de PowerShell**:
 

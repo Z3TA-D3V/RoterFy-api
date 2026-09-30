@@ -6,6 +6,7 @@ import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import { randomUUID } from 'node:crypto';
 import { buildScriptInput, estimateCost, getOpenAIClient, MODELS } from './script-ai.js';
+import { createDownloadManager } from './downloads.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const audioDir = path.resolve(process.env.AUDIO_DIR || path.join(root, '..', 'public', 'assets', 'audio'));
@@ -20,6 +21,7 @@ const recordingsDir = path.resolve(process.env.RECORDINGS_DIR || path.join(asset
 const recordingsPath = path.join(dataDir, 'script-recordings.json');
 const app = express();
 const port = Number(process.env.PORT || 3001);
+const host = process.env.API_HOST || '127.0.0.1';
 const frontendOrigins = process.env.FRONTEND_ORIGIN?.split(',').map((origin) => origin.trim());
 let pendingMutation = Promise.resolve();
 
@@ -120,6 +122,41 @@ function dataRoutes(name, file, requiredFields) {
 
 dataRoutes('scripts', scriptsPath, ['title', 'content', 'category', 'status']);
 dataRoutes('stock-videos', videosPath, ['title', 'category', 'format', 'durationText', 'notes']);
+
+const downloads = createDownloadManager({ audioDir, videosDir, readManifest, writeManifest,
+  readVideos: () => readList(videosPath), writeVideos: (items) => writeList(videosPath, items), serializeMutation });
+
+app.get('/api/downloads', (_req, res) => res.set('Cache-Control', 'no-store').json(downloads.list()));
+app.post('/api/downloads', (req, res, next) => {
+  try { res.status(202).json(downloads.start(req.body?.url, req.body?.mode, req.body?.category)); }
+  catch (error) { next(error); }
+});
+app.get('/api/downloads/:id/file', async (req, res, next) => {
+  try {
+    if (!validId(req.params.id)) return res.status(400).json({ error: 'ID no válido' });
+    const [sounds, videos] = await Promise.all([readManifest(), readList(videosPath)]);
+    const sound = sounds.find((item) => item.id === req.params.id && item.file === `${item.id}.wav`);
+    const video = videos.find((item) => item.id === req.params.id &&
+      ['mp4', 'webm', 'mov'].some((ext) => item.localPath === `/assets/videos/${item.id}.${ext}`));
+    if (!sound && !video) return res.status(404).json({ error: 'Archivo no disponible' });
+    const filename = sound ? sound.file : path.basename(video.localPath);
+    const directory = sound ? audioDir : videosDir;
+    const title = String((sound || video).title || 'descarga').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 100) || 'descarga';
+    res.download(path.join(directory, filename), `${title}${path.extname(filename)}`, (error) => {
+      if (error && !res.headersSent) next(error);
+    });
+  } catch (error) { next(error); }
+});
+app.get('/api/downloads/:id', (req, res) => {
+  const job = downloads.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Descarga no encontrada' });
+  res.set('Cache-Control', 'no-store').json(job);
+});
+app.delete('/api/downloads/:id', (req, res) => {
+  const job = downloads.cancel(req.params.id);
+  if (!job) return res.status(404).json({ error: 'Descarga no encontrada' });
+  res.json(job);
+});
 
 const recordingTypes = { 'audio/webm': 'webm', 'audio/ogg': 'ogg', 'audio/mp4': 'm4a', 'audio/wav': 'wav' };
 const recordingLimit = 300 * 1024 * 1024;
@@ -571,7 +608,7 @@ app.use('/api/images', express.static(imagesDir));
 app.use('/api/videos', express.static(videosDir));
 
 app.use((error, _req, res, _next) => {
-  if (error.code !== 'MISSING_OPENAI_KEY') console.error(error);
+  if ((error.status || 500) >= 500 && error.code !== 'MISSING_OPENAI_KEY') console.error(error);
   res.status(error.status || 500).json({ error: error.message || 'Error al guardar el audio' });
 });
 
@@ -581,4 +618,4 @@ await Promise.all([scriptsPath, videosPath, recordingsPath].map(async (file) => 
   try { await fs.writeFile(file, '[]\n', { flag: 'wx' }); }
   catch (error) { if (error.code !== 'EEXIST') throw error; }
 }));
-app.listen(port, '127.0.0.1', () => console.log(`RotVault API: http://127.0.0.1:${port}`));
+app.listen(port, host, () => console.log(`RotVault API: http://${host}:${port}`));

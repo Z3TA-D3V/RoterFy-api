@@ -41,6 +41,11 @@ test('la API persiste y borra guiones, vídeos y audios con portada', async () =
     const base = `http://127.0.0.1:${port}/api`;
     const json = (value) => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
 
+    assert.equal((await fetch(`${base}/downloads`, json({ url: 'https://example.com/video', mode: 'video' }))).status, 400);
+    assert.deepEqual(await (await fetch(`${base}/downloads`)).json(), []);
+    assert.equal((await fetch(`${base}/downloads/missing/file`)).status, 404);
+    assert.doesNotMatch(stderr, /URL no válida/);
+
     assert.equal((await fetch(`${base}/scripts`, { headers: { Origin: 'https://unknown.example' } })).status, 403);
     const preflight = await fetch(`${base}/scripts`, { method: 'OPTIONS', headers: { Origin: 'http://localhost:3000' } });
     assert.equal(preflight.status, 204);
@@ -93,6 +98,14 @@ test('la API persiste y borra guiones, vídeos y audios con portada', async () =
     })).status, 200);
     const videoFile = path.join(temporaryRoot, 'assets', 'videos', 'video-test.mp4');
     assert.ok(existsSync(videoFile));
+    const browserVideo = await fetch(`${base}/downloads/video-test/file`);
+    assert.equal(browserVideo.status, 200);
+    assert.match(browserVideo.headers.get('content-disposition'), /attachment/);
+    assert.equal(await browserVideo.text(), 'video-demo');
+    const recategorized = await (await fetch(`${base}/stock-videos`, json({ ...video, category: 'Montajes' }))).json();
+    assert.equal(recategorized.category, 'Montajes');
+    assert.equal(recategorized.localPath, '/assets/videos/video-test.mp4');
+    assert.ok(existsSync(videoFile));
     assert.equal((await fetch(`${base}/stock-videos/video-test`, { method: 'DELETE' })).status, 204);
     assert.ok(!existsSync(videoFile));
 
@@ -108,6 +121,10 @@ test('la API persiste y borra guiones, vídeos y audios con portada', async () =
       coverBase64: `data:image/jpeg;base64,${cover.toString('base64')}` }));
     assert.equal(created.status, 201);
     assert.equal((await created.json()).coverImage, '/assets/images/sound-test.jpg');
+    const browserAudio = await fetch(`${base}/downloads/sound-test/file`);
+    assert.equal(browserAudio.status, 200);
+    assert.match(browserAudio.headers.get('content-disposition'), /attachment/);
+    assert.deepEqual(Buffer.from(await browserAudio.arrayBuffer()), wav);
     assert.equal((await fetch(`${base}/sounds`, json({ sound, audioBase64: wav.toString('base64') }))).status, 409);
     const coverFile = path.join(temporaryRoot, 'assets', 'images', 'sound-test.jpg');
     assert.ok(existsSync(coverFile));
