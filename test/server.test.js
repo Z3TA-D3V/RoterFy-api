@@ -42,6 +42,9 @@ test('la API persiste y borra guiones, vídeos y audios con portada', async () =
     const json = (value) => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
 
     assert.equal((await fetch(`${base}/downloads`, json({ url: 'https://example.com/video', mode: 'video' }))).status, 400);
+    assert.equal((await fetch(`${base}/downloads`, json({ url: 'https://youtu.be/abcdefghijk', mode: 'video', quality: '1440' }))).status, 400);
+    assert.equal((await fetch(`${base}/downloads`, json({ url: 'https://youtu.be/abcdefghijk', mode: 'video', maxSizeGb: 11 }))).status, 400);
+    assert.equal((await fetch(`${base}/downloads/missing/retry`, { method: 'POST' })).status, 404);
     assert.deepEqual(await (await fetch(`${base}/downloads`)).json(), []);
     assert.equal((await fetch(`${base}/downloads/missing/file`)).status, 404);
     assert.doesNotMatch(stderr, /URL no válida/);

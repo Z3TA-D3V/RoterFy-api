@@ -124,12 +124,20 @@ dataRoutes('scripts', scriptsPath, ['title', 'content', 'category', 'status']);
 dataRoutes('stock-videos', videosPath, ['title', 'category', 'format', 'durationText', 'notes']);
 
 const downloads = createDownloadManager({ audioDir, videosDir, readManifest, writeManifest,
-  readVideos: () => readList(videosPath), writeVideos: (items) => writeList(videosPath, items), serializeMutation });
+  readVideos: () => readList(videosPath), writeVideos: (items) => writeList(videosPath, items), serializeMutation,
+  jobsPath: path.join(dataDir, 'download-jobs.json') });
 
 app.get('/api/downloads', (_req, res) => res.set('Cache-Control', 'no-store').json(downloads.list()));
-app.post('/api/downloads', (req, res, next) => {
-  try { res.status(202).json(downloads.start(req.body?.url, req.body?.mode, req.body?.category)); }
+app.post('/api/downloads', async (req, res, next) => {
+  try { res.status(202).json(await downloads.start(req.body?.url, req.body?.mode, req.body?.category, req.body?.quality, req.body?.maxSizeGb)); }
   catch (error) { next(error); }
+});
+app.post('/api/downloads/:id/retry', async (req, res, next) => {
+  try {
+    const job = await downloads.retry(req.params.id);
+    if (!job) return res.status(404).json({ error: 'Descarga no encontrada' });
+    res.status(202).json(job);
+  } catch (error) { next(error); }
 });
 app.get('/api/downloads/:id/file', async (req, res, next) => {
   try {
@@ -609,7 +617,8 @@ app.use('/api/videos', express.static(videosDir));
 
 app.use((error, _req, res, _next) => {
   if ((error.status || 500) >= 500 && error.code !== 'MISSING_OPENAI_KEY') console.error(error);
-  res.status(error.status || 500).json({ error: error.message || 'Error al guardar el audio' });
+  res.status(error.status || 500).json({ error: error.message || 'Error al guardar el audio',
+    ...(error.existingId ? { existingId: error.existingId } : {}) });
 });
 
 await fs.access(manifestPath);
@@ -618,4 +627,5 @@ await Promise.all([scriptsPath, videosPath, recordingsPath].map(async (file) => 
   try { await fs.writeFile(file, '[]\n', { flag: 'wx' }); }
   catch (error) { if (error.code !== 'EEXIST') throw error; }
 }));
+await downloads.restore();
 app.listen(port, host, () => console.log(`RotVault API: http://${host}:${port}`));

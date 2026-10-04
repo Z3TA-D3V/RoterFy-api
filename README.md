@@ -20,6 +20,15 @@ esta API. `YTDLP_PATH` y `FFMPEG_PATH` permiten indicar ejecutables fuera de
 comandos del navegador. `API_HOST` cambia la interfaz de escucha (por defecto
 `127.0.0.1`); para una red privada, consulta las instrucciones del README
 principal y configura también `FRONTEND_ORIGIN` y `VITE_API_URL`.
+Las tareas se persisten en `DATA_DIR/download-jobs.json` (o en
+`public/assets/data/download-jobs.json`). Al reiniciar, las tareas a medias
+quedan marcadas como interrumpidas y se pueden reintentar desde la interfaz.
+La calidad admite `best`, `1080`, `720` y `480`; los Shorts verticales usan el
+ancho como límite. Si falta un MP4 compatible, la API intenta otro formato y
+lo convierte a H.264/AAC con `ffmpeg`.
+El límite por archivo se puede ajustar desde **Descargas** entre 1 y 10 GB
+(predeterminado: 10 GB). Si `yt-dlp` deja pistas de vídeo y audio separadas,
+la API intenta fusionarlas con `ffmpeg` antes de guardar el vídeo.
 
 Para usar el asistente de Guiones, configura `OPENAI_API_KEY` **antes de arrancar
 la API y en la misma ventana de PowerShell**:
