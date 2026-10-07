@@ -50,7 +50,13 @@ test('el chat transmite la respuesta y persiste historial, usage y coste', async
       systemPromptUsed: 'Estilo personalizado', chatHistory: [] };
     assert.equal((await fetch(`${base}/scripts`, post(script))).status, 200);
     assert.equal((await fetch(`${base}/scripts/script-chat/chat`, post({ message: 'Mal', mandatoryFormat: '' }))).status, 400);
-    const response = await fetch(`${base}/scripts/script-chat/chat`, post({ message: 'Mejora el inicio', model: 'gpt-6-luna', reasoningEffort: 'medium', mandatoryFormat: 'Usa [VOZ]texto[/VOZ] en cada intervención.' }));
+    const tooLong = await fetch(`${base}/scripts/script-chat/chat`, post({ message: 'x'.repeat(100_001) }));
+    assert.equal(tooLong.status, 400);
+    assert.match((await tooLong.json()).error, /100001.*100000/);
+    assert.equal(received, undefined, 'No debe enviar mensajes rechazados a OpenAI');
+    const message = `Fusiona estos dos guiones:\n${'Texto del guión con narración y montaje.\n'.repeat(700)}`;
+    assert.ok(message.length > 25_768);
+    const response = await fetch(`${base}/scripts/script-chat/chat`, post({ message, model: 'gpt-6-luna', reasoningEffort: 'medium', mandatoryFormat: 'Usa [VOZ]texto[/VOZ] en cada intervención.' }));
     assert.equal(response.status, 200);
     const events = (await response.text()).trim().split('\n').map((line) => JSON.parse(line));
     assert.deepEqual(events.map((event) => event.type), ['delta', 'delta', 'done']);
@@ -64,9 +70,11 @@ test('el chat transmite la respuesta y persiste historial, usage y coste', async
     assert.match(received.input[0].content, /Usa \[VOZ\]texto\[\/VOZ\]/);
     assert.doesNotMatch(received.input[0].content, /\[NARRADOR\]/);
     assert.match(received.input[1].content, /# Actual/);
+    assert.equal(received.input.at(-1).content, message.trim());
     const saved = (await (await fetch(`${base}/scripts`)).json())[0];
     assert.equal(saved.content, '# Actual');
     assert.equal(saved.chatHistory.length, 2);
+    assert.equal(saved.chatHistory[0].content, message.trim());
     assert.equal(saved.totalCost, events.at(-1).assistant.cost);
     assert.equal(JSON.parse(readFileSync(path.join(root, 'data', 'scripts.json')))[0].chatHistory.length, 2);
   } finally {

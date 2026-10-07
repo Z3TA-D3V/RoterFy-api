@@ -22,6 +22,7 @@ const recordingsPath = path.join(dataDir, 'script-recordings.json');
 const app = express();
 const port = Number(process.env.PORT || 3001);
 const host = process.env.API_HOST || '127.0.0.1';
+const maxChatMessageLength = 100_000;
 const frontendOrigins = process.env.FRONTEND_ORIGIN?.split(',').map((origin) => origin.trim());
 let pendingMutation = Promise.resolve();
 
@@ -301,10 +302,13 @@ app.delete('/api/scripts/:id/recordings/:takeId', async (req, res, next) => {
 app.post('/api/scripts/:id/chat', async (req, res, next) => {
   try {
     const { message, model = 'gpt-6-luna', reasoningEffort = 'low', mandatoryFormat } = req.body || {};
-    if (!validId(req.params.id) || typeof message !== 'string' || !message.trim() || message.length > 12000 ||
+    if (!validId(req.params.id) || typeof message !== 'string' || !message.trim() ||
       !Object.hasOwn(MODELS, model) || !['low', 'medium', 'high'].includes(reasoningEffort) ||
       (mandatoryFormat !== undefined && (typeof mandatoryFormat !== 'string' || !mandatoryFormat.trim() || mandatoryFormat.length > 4000))) {
       return res.status(400).json({ error: 'Parámetros de chat no válidos' });
+    }
+    if (message.length > maxChatMessageLength) {
+      return res.status(400).json({ error: `El mensaje tiene ${message.length} caracteres; el máximo permitido es ${maxChatMessageLength}.` });
     }
     const script = (await readList(scriptsPath)).find((item) => item.id === req.params.id);
     if (!script) return res.status(404).json({ error: 'Guión no encontrado' });
